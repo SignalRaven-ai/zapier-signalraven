@@ -31,17 +31,26 @@ const exchange = async (bundle, scopes) => {
 };
 
 const getSessionKey = async (z, bundle) => {
-  // A key may have been created with a subset of scopes. Ask for everything
-  // first, then fall back to the read set.
-  let response = await exchange(bundle, ALL_SCOPES);
-  if (response.status === 400 && /invalid_scope/i.test(JSON.stringify(response.data))) {
-    response = await exchange(bundle, READ_SCOPES);
+  // A key may have been created with any subset of scopes. Ask for the full
+  // set; when the auth server names a scope the key lacks, drop it and ask
+  // again, until the exchange succeeds or nothing is left to drop.
+  let scopes = [...ALL_SCOPES];
+  let response;
+  for (let attempt = 0; attempt < ALL_SCOPES.length + 1; attempt++) {
+    response = await exchange(bundle, scopes);
+    if (response.status < 400 && response.data.access_token) {
+      return { sessionKey: response.data.access_token };
+    }
+    const text = JSON.stringify(response.data);
+    const m = /not allowed to request scope '([^']+)'/.exec(text);
+    if (response.status === 400 && /invalid_scope/i.test(text) && m && scopes.includes(m[1]) && scopes.length > 1) {
+      scopes = scopes.filter((s) => s !== m[1]);
+      continue;
+    }
+    break;
   }
-  if (response.status >= 400 || !response.data.access_token) {
-    const detail = response.data.error_description || response.data.error || `HTTP ${response.status}`;
-    throw new z.errors.Error(`Token exchange failed: ${detail}. Check the client id and secret.`, 'AuthenticationError', response.status);
-  }
-  return { sessionKey: response.data.access_token };
+  const detail = (response.data && (response.data.error_description || response.data.error)) || `HTTP ${response.status}`;
+  throw new z.errors.Error(`Token exchange failed: ${detail}. Check the client id and secret.`, 'AuthenticationError', response.status);
 };
 
 const test = (z) => z.request({ url: `${BASE_URL}/_authcheck` });
